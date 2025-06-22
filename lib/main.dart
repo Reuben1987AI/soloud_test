@@ -4,210 +4,291 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_soloud/flutter_soloud.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  
-  runApp(const MaterialApp(
-    home: SoLoudPositionTest(),
-  ));
+void main() {
+  runApp(const MaterialApp(home: HandleEventTest()));
 }
 
-class SoLoudPositionTest extends StatefulWidget {
-  const SoLoudPositionTest({super.key});
-  
+class HandleEventTest extends StatefulWidget {
+  const HandleEventTest({super.key});
+
   @override
-  State<SoLoudPositionTest> createState() => _SoLoudPositionTestState();
+  State<HandleEventTest> createState() => _HandleEventTestState();
 }
 
-class _SoLoudPositionTestState extends State<SoLoudPositionTest> {
+class _HandleEventTestState extends State<HandleEventTest> {
   late SoLoud soloud;
-  List<String> logs = [];
-  bool isRunning = false;
+  SoundHandle? _handle;
+  AudioSource? _source;
+  final List<String> _logs = [];
+  StreamSubscription? _eventSubscription;
 
   @override
   void initState() {
     super.initState();
     soloud = SoLoud.instance;
-    initSoLoud();
+    _initSoLoud();
   }
 
-  Future<void> initSoLoud() async {
+  Future<void> _initSoLoud() async {
     try {
-      await soloud.init(
-        sampleRate: 16000,
-        bufferSize: 1024,
-        channels: Channels.mono,
-      );
-      addLog('SoLoud initialized successfully');
+      await soloud.init();
+      _log('SoLoud initialized');
     } catch (e) {
-      addLog('Failed to initialize SoLoud: $e');
+      _log('Failed to initialize: $e');
     }
   }
 
-  void addLog(String message) {
+  void _log(String message) {
     setState(() {
-      logs.add('[${DateTime.now().toString().split('.')[0]}] $message');
-      // Keep only last 20 logs
-      if (logs.length > 20) {
-        logs.removeAt(0);
-      }
+      _logs.add('[${DateTime.now().toString().split('.')[0]}] $message');
+      if (_logs.length > 15) _logs.removeAt(0);
     });
-    debugPrint(message);
   }
 
-  Future<void> runPositionTest() async {
-    if (isRunning) return;
-    
-    setState(() {
-      isRunning = true;
-      logs.clear();
-    });
+  void _onVoicePlaybackFinished() {
+    _log('✅ handleIsNoMoreValid event received!');
+    _log('Voice playback finished callback executed');
+  }
 
+  Uint8List _createWavFile(double duration, int sampleRate) {
+    final samples = (sampleRate * duration).toInt();
+    final dataSize = samples * 2; // 16-bit mono
+    final fileSize = 44 + dataSize - 8;
+    
+    final buffer = Uint8List(44 + dataSize);
+    final data = ByteData.sublistView(buffer);
+    
+    // WAV header
+    buffer.setRange(0, 4, 'RIFF'.codeUnits);
+    data.setUint32(4, fileSize, Endian.little);
+    buffer.setRange(8, 12, 'WAVE'.codeUnits);
+    buffer.setRange(12, 16, 'fmt '.codeUnits);
+    data.setUint32(16, 16, Endian.little); // fmt chunk size
+    data.setUint16(20, 1, Endian.little); // PCM format
+    data.setUint16(22, 1, Endian.little); // mono
+    data.setUint32(24, sampleRate, Endian.little);
+    data.setUint32(28, sampleRate * 2, Endian.little); // byte rate
+    data.setUint16(32, 2, Endian.little); // block align
+    data.setUint16(34, 16, Endian.little); // bits per sample
+    buffer.setRange(36, 40, 'data'.codeUnits);
+    data.setUint32(40, dataSize, Endian.little);
+    
+    // Generate audio data (fade in)
+    for (int i = 0; i < samples; i++) {
+      final value = (32767 * 0.3 * (i / samples)).toInt();
+      data.setInt16(44 + i * 2, value, Endian.little);
+    }
+    
+    return buffer;
+  }
+
+  Future<void> _testShortSound() async {
+    _log('--- Testing with short sound ---');
+    
     try {
-      addLog('Creating buffer stream...');
+      // Create a very short sound (0.5 seconds)
+      final buffer = _createWavFile(0.5, 44100);
       
-      // Create buffer stream
-      final streamSource = soloud.setBufferStream(
-        maxBufferSizeBytes: 1024 * 1024 * 2, // 2MB
-        bufferingType: BufferingType.released,
+      _source = await soloud.loadMem('short_test.wav', buffer);
+      _log('Sound loaded');
+      
+      // Listen for events
+      _eventSubscription?.cancel();
+      _eventSubscription = _source!.soundEvents.listen((data) {
+        _log('Event received: ${data.event}');
+        if (data.handle == _handle && data.event == SoundEventType.handleIsNoMoreValid) {
+          _onVoicePlaybackFinished();
+        }
+      });
+      
+      _handle = await soloud.play(_source!);
+      _log('Sound playing with handle: $_handle');
+      
+    } catch (e) {
+      _log('Error: $e');
+    }
+  }
+
+  Future<void> _testManualStop() async {
+    _log('--- Testing with manual stop ---');
+    
+    try {
+      // Create a longer sound (5 seconds)
+      final buffer = _createWavFile(5.0, 44100);
+      
+      _source = await soloud.loadMem('long_test.wav', buffer);
+      _log('Long sound loaded (5 seconds)');
+      
+      // Listen for events
+      _eventSubscription?.cancel();
+      _eventSubscription = _source!.soundEvents.listen((data) {
+        _log('Event received: ${data.event}');
+        if (data.handle == _handle && data.event == SoundEventType.handleIsNoMoreValid) {
+          _onVoicePlaybackFinished();
+        }
+      });
+      
+      _handle = await soloud.play(_source!);
+      _log('Sound playing with handle: $_handle');
+      
+      // Stop after 1 second
+      await Future.delayed(const Duration(seconds: 1));
+      _log('Stopping sound manually...');
+      await soloud.stop(_handle!);
+      
+    } catch (e) {
+      _log('Error: $e');
+    }
+  }
+
+  Future<void> _testStreamingSound() async {
+    _log('--- Testing streaming with unknown length ---');
+    
+    AudioSource? streamSource;
+    
+    try {
+      // Create stream as per your configuration
+      streamSource = await soloud.setBufferStream(
+        maxBufferSizeBytes: 1024 * 1024 * 40, // 40MB
+        bufferingType: BufferingType.preserved,
         bufferingTimeNeeds: 0.5,
         sampleRate: 16000,
         channels: Channels.mono,
-        format: BufferType.s16le,
+        format: BufferType.s16le, // 16-bit signed little-endian
       );
-
-      addLog('Starting playback...');
+      _log('Stream source created');
       
-      // Start playback
-      final handle = await soloud.play(streamSource);
-      
-      // Generate and feed white noise
-      final random = Random();
-      const chunkDurationMs = 100;
-      const samplesPerChunk = 16000 * chunkDurationMs ~/ 1000;
-      const bytesPerChunk = samplesPerChunk * 2;
-      
-      // Position tracking
-      final positionHistory = <Duration>[];
-      Timer? positionTimer;
-      
-      // Track position manually
-      int totalBytesStreamed = 0;
-      final startTime = DateTime.now();
-      
-      // Start position monitoring
-      int positionCheckCount = 0;
-      positionTimer = Timer.periodic(Duration(milliseconds: 100), (timer) async {
-        try {
-          final position = soloud.getPosition(handle);
-          positionHistory.add(position);
-          positionCheckCount++;
-          
-          // Calculate manual position based on bytes streamed
-          final manualPositionMs = (totalBytesStreamed / 2 / 16000 * 1000).round();
-          final elapsedMs = DateTime.now().difference(startTime).inMilliseconds;
-          
-          // Log every 5th position check
-          if (positionCheckCount % 5 == 0) {
-            addLog('SoLoud pos: ${position.inMilliseconds}ms | Manual: ${manualPositionMs}ms | Elapsed: ${elapsedMs}ms');
-          }
-          
-          // Also check buffer size and if sound is still playing
-          final bufferSize = soloud.getBufferSize(streamSource);
-          final isPlaying = soloud.getIsValidVoiceHandle(handle);
-          if (positionCheckCount % 5 == 0) {
-            addLog('Buffer: $bufferSize bytes | Playing: $isPlaying');
-          }
-        } catch (e) {
-          addLog('Error getting position: $e');
+      // Listen for events
+      _eventSubscription?.cancel();
+      _eventSubscription = streamSource.soundEvents.listen((data) {
+        _log('Event received: ${data.event}');
+        if (data.handle == _handle && data.event == SoundEventType.handleIsNoMoreValid) {
+          _onVoicePlaybackFinished();
         }
       });
-
-      // Feed audio chunks
-      for (int i = 0; i < 20; i++) {
-        // Generate white noise chunk
+      
+      // Start playback BEFORE generating data
+      _handle = await soloud.play(streamSource);
+      _log('Playback started with handle: $_handle');
+      
+      // Generate and stream data in chunks
+      const chunkDurationMs = 500; // 500ms chunks
+      const sampleRate = 16000;
+      const samplesPerChunk = sampleRate * chunkDurationMs ~/ 1000;
+      const bytesPerChunk = samplesPerChunk * 2; // 16-bit = 2 bytes
+      const totalChunks = 20; // 10 seconds total
+      
+      for (int i = 0; i < totalChunks; i++) {
+        // Generate audio chunk (simple tone)
         final chunk = Uint8List(bytesPerChunk);
-        for (int j = 0; j < chunk.length; j += 2) {
-          final sample = (random.nextDouble() * 65536 - 32768).toInt();
-          chunk[j] = sample & 0xFF;
-          chunk[j + 1] = (sample >> 8) & 0xFF;
+        final frequency = 440.0 + (i * 20); // Varying frequency
+        
+        for (int j = 0; j < samplesPerChunk; j++) {
+          final t = j / sampleRate;
+          final value = (32767 * 0.3 * sin(2 * pi * frequency * t)).toInt();
+          chunk[j * 2] = value & 0xFF;
+          chunk[j * 2 + 1] = (value >> 8) & 0xFF;
         }
         
         // Add chunk to stream
         soloud.addAudioDataStream(streamSource, chunk);
-        totalBytesStreamed += chunk.length;
         
-        if (i % 5 == 0) {
-          addLog('Added chunk ${i + 1}/20 (Total: $totalBytesStreamed bytes)');
+        if (i % 4 == 0) {
+          _log('Streamed chunk ${i + 1}/$totalChunks (${(i + 1) * 0.5}s)');
         }
         
+        // Simulate real-time streaming
         await Future.delayed(Duration(milliseconds: chunkDurationMs));
       }
       
-      // Signal that streaming is complete
-      addLog('Calling setDataIsEnded()...');
+      // Signal end of stream
+      _log('Calling setDataIsEnded()...');
       soloud.setDataIsEnded(streamSource);
       
-      // Wait a bit more
-      await Future.delayed(Duration(seconds: 2));
+      // Wait for playback to finish
+      _log('Waiting for handleIsNoMoreValid event...');
+      await Future.delayed(const Duration(seconds: 3));
       
-      // Stop monitoring
-      positionTimer.cancel();
-      
-      // Analyze results
-      addLog('=== Analysis ===');
-      final nonZeroPositions = positionHistory.where((p) => p > Duration.zero).toList();
-      addLog('Total readings: ${positionHistory.length}');
-      addLog('Non-zero positions: ${nonZeroPositions.length}');
-      
-      if (nonZeroPositions.isEmpty) {
-        addLog('⚠️ All positions were zero!');
-      } else {
-        final maxPosition = positionHistory.fold<Duration>(
-          Duration.zero,
-          (max, p) => p > max ? p : max,
-        );
-        addLog('✅ Max position: ${maxPosition.inMilliseconds}ms');
+      // Cleanup stream source
+      if (streamSource != null) {
+        await soloud.disposeSource(streamSource);
       }
       
-      // Clean up
-      await soloud.stop(handle);
-      await soloud.disposeSource(streamSource);
-      
     } catch (e) {
-      addLog('Test error: $e');
-    } finally {
-      setState(() {
-        isRunning = false;
-      });
+      _log('Error: $e');
+      if (streamSource != null) {
+        await soloud.disposeSource(streamSource);
+      }
     }
+  }
+
+  Future<void> _cleanup() async {
+    _eventSubscription?.cancel();
+    if (_source != null) {
+      await soloud.disposeSource(_source!);
+      _source = null;
+    }
+    _handle = null;
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: Text('SoLoud Position Test'),
-      ),
+      appBar: AppBar(title: const Text('Handle Event Test')),
       body: Column(
         children: [
           Padding(
-            padding: EdgeInsets.all(16),
-            child: ElevatedButton(
-              onPressed: isRunning ? null : runPositionTest,
-              child: Text(isRunning ? 'Running...' : 'Run Position Test'),
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                ElevatedButton(
+                  onPressed: () async {
+                    await _cleanup();
+                    await _testShortSound();
+                  },
+                  child: const Text('Test Short Sound (0.5s)'),
+                ),
+                const SizedBox(height: 8),
+                ElevatedButton(
+                  onPressed: () async {
+                    await _cleanup();
+                    await _testManualStop();
+                  },
+                  child: const Text('Test Manual Stop'),
+                ),
+                const SizedBox(height: 8),
+                ElevatedButton(
+                  onPressed: () async {
+                    await _cleanup();
+                    await _testStreamingSound();
+                  },
+                  child: const Text('Test Streaming (10s)'),
+                ),
+                const SizedBox(height: 8),
+                ElevatedButton(
+                  onPressed: _cleanup,
+                  child: const Text('Cleanup'),
+                ),
+              ],
             ),
           ),
           Expanded(
             child: Container(
               color: Colors.black12,
+              padding: const EdgeInsets.all(8),
               child: ListView.builder(
-                padding: EdgeInsets.all(8),
-                itemCount: logs.length,
+                itemCount: _logs.length,
                 itemBuilder: (context, index) {
+                  final log = _logs[index];
+                  final isSuccess = log.contains('✅');
                   return Text(
-                    logs[index],
-                    style: TextStyle(fontFamily: 'monospace', fontSize: 12),
+                    log,
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      color: isSuccess ? Colors.green : null,
+                      fontWeight: isSuccess ? FontWeight.bold : null,
+                    ),
                   );
                 },
               ),
@@ -220,6 +301,7 @@ class _SoLoudPositionTestState extends State<SoLoudPositionTest> {
 
   @override
   void dispose() {
+    _cleanup();
     soloud.deinit();
     super.dispose();
   }
