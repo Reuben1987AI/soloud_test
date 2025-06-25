@@ -21,6 +21,7 @@ class _HandleEventTestState extends State<HandleEventTest> {
   AudioSource? _source;
   final List<String> _logs = [];
   StreamSubscription? _eventSubscription;
+  Timer? _positionTimer;
 
   @override
   void initState() {
@@ -94,9 +95,9 @@ class _HandleEventTestState extends State<HandleEventTest> {
       
       // Listen for events
       _eventSubscription?.cancel();
-      _eventSubscription = _source!.soundEvents.listen((data) {
-        _log('Event received: ${data.event}');
-        if (data.handle == _handle && data.event == SoundEventType.handleIsNoMoreValid) {
+      _eventSubscription = _source!.soundEvents.listen((eventData) {
+        _log('Event received: ${eventData.event}');
+        if (eventData.handle == _handle && eventData.event == SoundEventType.handleIsNoMoreValid) {
           _onVoicePlaybackFinished();
         }
       });
@@ -109,37 +110,6 @@ class _HandleEventTestState extends State<HandleEventTest> {
     }
   }
 
-  Future<void> _testManualStop() async {
-    _log('--- Testing with manual stop ---');
-    
-    try {
-      // Create a longer sound (5 seconds)
-      final buffer = _createWavFile(5.0, 44100);
-      
-      _source = await soloud.loadMem('long_test.wav', buffer);
-      _log('Long sound loaded (5 seconds)');
-      
-      // Listen for events
-      _eventSubscription?.cancel();
-      _eventSubscription = _source!.soundEvents.listen((data) {
-        _log('Event received: ${data.event}');
-        if (data.handle == _handle && data.event == SoundEventType.handleIsNoMoreValid) {
-          _onVoicePlaybackFinished();
-        }
-      });
-      
-      _handle = await soloud.play(_source!);
-      _log('Sound playing with handle: $_handle');
-      
-      // Stop after 1 second
-      await Future.delayed(const Duration(seconds: 1));
-      _log('Stopping sound manually...');
-      await soloud.stop(_handle!);
-      
-    } catch (e) {
-      _log('Error: $e');
-    }
-  }
 
   Future<void> _testStreamingSound() async {
     _log('--- Testing streaming with unknown length ---');
@@ -160,9 +130,9 @@ class _HandleEventTestState extends State<HandleEventTest> {
       
       // Listen for events
       _eventSubscription?.cancel();
-      _eventSubscription = streamSource.soundEvents.listen((data) {
-        _log('Event received: ${data.event}');
-        if (data.handle == _handle && data.event == SoundEventType.handleIsNoMoreValid) {
+      _eventSubscription = streamSource.soundEvents.listen((eventData) {
+        _log('Event received: ${eventData.event}');
+        if (eventData.handle == _handle && eventData.event == SoundEventType.handleIsNoMoreValid) {
           _onVoicePlaybackFinished();
         }
       });
@@ -170,6 +140,18 @@ class _HandleEventTestState extends State<HandleEventTest> {
       // Start playback BEFORE generating data
       _handle = await soloud.play(streamSource);
       _log('Playback started with handle: $_handle');
+      
+      // Start position logging timer
+      _positionTimer = Timer.periodic(const Duration(milliseconds: 200), (timer) {
+        if (_handle != null) {
+          try {
+            final position = soloud.getPosition(_handle!);
+            _log('Position: ${position.inMilliseconds / 1000.0}s');
+          } catch (e) {
+            _log('Position error: $e');
+          }
+        }
+      });
       
       // Generate and stream data in chunks
       const chunkDurationMs = 500; // 500ms chunks
@@ -209,6 +191,10 @@ class _HandleEventTestState extends State<HandleEventTest> {
       _log('Waiting for handleIsNoMoreValid event...');
       await Future.delayed(const Duration(seconds: 3));
       
+      // Stop position timer
+      _positionTimer?.cancel();
+      _positionTimer = null;
+      
       // Cleanup stream source
       if (streamSource != null) {
         await soloud.disposeSource(streamSource);
@@ -216,6 +202,8 @@ class _HandleEventTestState extends State<HandleEventTest> {
       
     } catch (e) {
       _log('Error: $e');
+      _positionTimer?.cancel();
+      _positionTimer = null;
       if (streamSource != null) {
         await soloud.disposeSource(streamSource);
       }
@@ -224,6 +212,8 @@ class _HandleEventTestState extends State<HandleEventTest> {
 
   Future<void> _cleanup() async {
     _eventSubscription?.cancel();
+    _positionTimer?.cancel();
+    _positionTimer = null;
     if (_source != null) {
       await soloud.disposeSource(_source!);
       _source = null;
@@ -247,14 +237,6 @@ class _HandleEventTestState extends State<HandleEventTest> {
                     await _testShortSound();
                   },
                   child: const Text('Test Short Sound (0.5s)'),
-                ),
-                const SizedBox(height: 8),
-                ElevatedButton(
-                  onPressed: () async {
-                    await _cleanup();
-                    await _testManualStop();
-                  },
-                  child: const Text('Test Manual Stop'),
                 ),
                 const SizedBox(height: 8),
                 ElevatedButton(
